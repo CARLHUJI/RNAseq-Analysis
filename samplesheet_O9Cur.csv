@@ -1,0 +1,4 @@
+sample,fastq_1,fastq_2,strandedness
+O9Cur_1,/home/govind/data/raw-aging/Roni_CURCAR1_S46_R1_001.fastq.gz,/home/govind/data/raw-aging/Roni_CURCAR1_S46_R2_001.fastq.gz,reverse
+O9Cur_2,/home/govind/data/raw-aging/Roni_CURCAR2_S47_R1_001.fastq.gz,/home/govind/data/raw-aging/Roni_CURCAR2_S47_R2_001.fastq.gz,reverse
+O9Cur_3,/home/govind/data/raw-aging/Roni_CURCAR3_S48_R1_001.fastq.gz,/home/govind/data/raw-aging/Roni_CURCAR3_S48_R2_001.fastq.gz,reverse

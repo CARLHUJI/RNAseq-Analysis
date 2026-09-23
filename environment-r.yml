@@ -1,0 +1,20 @@
+# Downstream differential-expression environment (DESeq2/edgeR on nf-core/rnaseq's counts matrix).
+# Upstream tools (STAR, Salmon, RSeQC, etc.) are pinned separately via nf-core/rnaseq's own
+# containers at run time (-r 3.26.0 -profile apptainer) — not part of this env.
+name: rnaseq-r
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base=4.4.*
+  - bioconductor-deseq2
+  - bioconductor-edger
+  - bioconductor-tximport
+  - bioconductor-apeglm       # shrinkage estimator for DESeq2 lfcShrink
+  - bioconductor-clusterprofiler
+  - bioconductor-org.mm.eg.db # mouse gene ID annotation
+  - r-pheatmap
+  - r-ggplot2
+  - r-ggrepel
+  - r-rmarkdown
+  - r-tidyverse

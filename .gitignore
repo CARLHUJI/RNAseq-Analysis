@@ -1,0 +1,17 @@
+# Nextflow runtime
+.nextflow*
+work/
+nf-work/
+null/
+*.out
+
+# Data and results (large; kept on disk and backed up to D:, not versioned)
+results/
+results-aging/
+*.fastq.gz
+*.bam
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
