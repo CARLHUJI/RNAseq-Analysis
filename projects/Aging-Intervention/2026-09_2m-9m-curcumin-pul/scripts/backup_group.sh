@@ -16,7 +16,7 @@ mkdir -p "$DEST"
 echo "=== $(stamp) : rsync ${GROUP} -> D: ==="
 # NTFS via drvfs: skip owner/group/perms, compare on size+mtime (with 2s NTFS tolerance)
 rsync -rt --modify-window=2 --info=progress2 "$SRC" "$DEST"
-cp "$(dirname "${BASH_SOURCE[0]}")/samplesheet_${GROUP}.csv" "$DEST"
+cp "$(dirname "${BASH_SOURCE[0]}")/../config/samplesheet_${GROUP}.csv" "$DEST"
 
 echo "=== $(stamp) : verify ==="
 diffs=$(rsync -rn --size-only --out-format='%n' "$SRC" "$DEST" | grep -v '/$' || true)

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run one group end to end: nf-core/rnaseq, then Track A featureCounts.
-# Usage: run_group.sh <GROUP>   (GROUP = Y2 | O9C | O9Cur | O9Pul; reads samplesheet_<GROUP>.csv)
-# Launch detached:  setsid nohup bash run_group.sh O9C > ~/nf-work/logs/run_O9C_$(date +%Y%m%d_%H%M%S).log 2>&1 < /dev/null &
-# See docs/Aging_Intervention_Analysis.md.
+# Usage: scripts/run_group.sh <GROUP>   (GROUP = Y2 | O9C | O9Cur | O9Pul; reads config/samplesheet_<GROUP>.csv)
+# Launch detached:  setsid nohup bash scripts/run_group.sh O9C > ~/nf-work/logs/run_O9C_$(date +%Y%m%d_%H%M%S).log 2>&1 < /dev/null &
+# See ../docs/Aging_Intervention_Analysis.md.
 set -euo pipefail
 
 GROUP="$1"
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/../config"   # nextflow.config + samplesheets live here
 [ -f "samplesheet_${GROUP}.csv" ] || { echo "no samplesheet_${GROUP}.csv"; exit 1; }
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"

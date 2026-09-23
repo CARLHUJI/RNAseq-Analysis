@@ -1,0 +1,870 @@
+---
+title: "RNA-seq Differential Expression Analysis: Ob/Ob (WT vs Het vs Homo)"
+author: "govind"
+date: "2026-09-16"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+<!--
+RECONSTRUCTED 2026-09-23 from the knitted report (Rna_seq.html, rendered 2026-09-16 on macOS,
+R 4.4.3 / DESeq2 1.46.0). The original .Rmd was not available. Every R chunk below is the exact
+code shown in that report, in order; knitted output, plots and tables are regenerated on render.
+Not recoverable from the HTML and therefore re-created: the hidden setup chunk (knitr options and
+`tab_dir`, which later chunks write to) and the chunk labels/options (only `install` is known,
+with eval = FALSE, from the report text).
+Inputs expected next to this file: all_samples_gene_counts.tsv, sample_metadata.csv (not in git;
+archived on D:). See ../README.md for known issues affecting interpretation of these results.
+-->
+
+```{r setup, include=FALSE}
+# Re-created: not shown in the original report.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6)
+tab_dir <- "results/tables"
+dir.create(tab_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Overview
+
+Differential expression analysis of a mouse RNA-seq experiment across
+three genotypes:
+
+- `wt` (n = 2): wt2, wt3
+- `het` (n = 2): het2, het3
+- `homo` (n = 3): homo1, homo2, homo3
+
+**Primary contrast:** `homo vs wt`.
+Secondary: `het vs wt`, `homo vs het`.
+
+**Caveat:** n = 2 for wt and het is the minimum DESeq2
+accepts. Dispersion estimates are noisy at this sample size; padj
+cutoffs are strict and any hits should be treated as
+hypothesis-generating.
+
+# Environment / package check
+
+The intended R environment for this analysis is the conda env
+`rnaseq-r` defined in `environment-r.yml` (DESeq2,
+edgeR, tximport, apeglm, clusterProfiler, org.Mm.eg.db, pheatmap,
+ggplot2, ggrepel, tidyverse, rmarkdown). If you knit outside that env
+you’ll hit `there is no package called 'DESeq2'`.
+
+Two ways to fix:
+
+**Option A — activate the conda env, then render
+(recommended):**
+
+``` bash
+conda env create -f environment-r.yml   # first time only
+conda activate rnaseq-r
+Rscript -e 'rmarkdown::render("Rna_seq.Rmd")'
+```
+
+**Option B — install missing packages into the R you’re
+currently using.** Flip `eval = FALSE` to
+`eval = TRUE` on the chunk below and knit once; then switch
+it back so it doesn’t reinstall every render.
+
+```{r install, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+cran_pkgs <- c("tidyverse", "pheatmap", "RColorBrewer", "ggrepel")
+bioc_pkgs <- c("DESeq2", "apeglm", "clusterProfiler",
+               "org.Mm.eg.db", "enrichplot")
+
+missing_cran <- setdiff(cran_pkgs, rownames(installed.packages()))
+missing_bioc <- setdiff(bioc_pkgs, rownames(installed.packages()))
+if (length(missing_cran)) install.packages(missing_cran)
+if (length(missing_bioc)) BiocManager::install(missing_bioc, ask = FALSE,
+                                               update = FALSE)
+```
+
+## Preflight
+
+```{r}
+required <- c("DESeq2", "tidyverse", "pheatmap", "RColorBrewer",
+              "ggrepel", "clusterProfiler", "org.Mm.eg.db", "enrichplot")
+missing <- required[!vapply(required, requireNamespace,
+                            logical(1), quietly = TRUE)]
+if (length(missing)) {
+  stop("Missing R packages: ", paste(missing, collapse = ", "),
+       "\nEither activate the 'rnaseq-r' conda env (see environment-r.yml) ",
+       "or set eval=TRUE on the `install` chunk above and re-render.")
+}
+```
+
+# Libraries
+
+```{r}
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(ggrepel)
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(enrichplot)
+  library(tidyverse)   # loaded last so dplyr wins for select/filter/rename
+})
+# Bulletproof: force dplyr verbs to shadow AnnotationDbi/stats namesakes
+select <- dplyr::select
+filter <- dplyr::filter
+rename <- dplyr::rename
+set.seed(42)
+```
+
+# Load data
+
+## Counts matrix
+
+The counts TSV contains gene annotation columns (chr, start, end,
+strand, length) followed by the seven sample count columns. We strip
+annotation and keep an integer matrix keyed by ENSMUSG gene ID.
+
+```{r}
+counts_path <- "all_samples_gene_counts.tsv"
+raw <- read.table(counts_path, header = TRUE, sep = "\t",
+                  check.names = FALSE, stringsAsFactors = FALSE)
+
+# Save annotation for later (gene length, chr, etc.)
+gene_annot <- raw %>% select(gene_id, chr, start, end, strand, length)
+
+count_cols <- c("wt2", "wt3", "het2", "het3", "homo1", "homo2", "homo3")
+counts <- raw %>%
+  select(all_of(c("gene_id", count_cols))) %>%
+  column_to_rownames("gene_id") %>%
+  as.matrix()
+storage.mode(counts) <- "integer"
+
+cat("Counts matrix:", nrow(counts), "genes x", ncol(counts), "samples\n")
+```
+
+```{r}
+head(counts)
+```
+
+## Sample metadata
+
+```{r}
+meta <- read.csv("sample_metadata.csv", stringsAsFactors = FALSE) %>%
+  # Reorder rows to match count column order
+  { .[match(colnames(counts), .$sample), ] } %>%
+  mutate(genotype = factor(genotype, levels = c("wt", "het", "homo")))
+
+stopifnot(all(meta$sample == colnames(counts)))
+meta
+```
+
+# DESeq2 pipeline
+
+## Build DESeqDataSet and pre-filter
+
+Pre-filter genes with fewer than 10 total reads across all samples.
+This speeds up the fit and removes obviously uninformative genes without
+biasing the test.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData   = meta,
+  design    = ~ genotype
+)
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+cat("Genes retained after filter:", nrow(dds), "\n")
+```
+
+## Fit model (joint normalization across all samples)
+
+`DESeq()` computes size factors (median-of-ratios) across
+**all** samples jointly, then fits per-gene NB GLMs. This
+is the correct way to normalize wt/het/homo together.
+
+```{r}
+dds <- DESeq(dds)
+sizeFactors(dds)
+```
+
+## Normalized counts and VST
+
+```{r}
+norm_counts <- counts(dds, normalized = TRUE)
+vsd <- vst(dds, blind = FALSE)
+
+write.csv(norm_counts,
+          file = file.path(tab_dir, "normalized_counts.csv"))
+```
+
+# Global QC
+
+## Library sizes (raw vs normalized)
+
+```{r}
+lib_df <- tibble(
+  sample   = colnames(counts),
+  genotype = meta$genotype,
+  raw      = colSums(counts),
+  norm     = colSums(norm_counts)
+) %>%
+  pivot_longer(c(raw, norm), names_to = "type", values_to = "reads")
+
+ggplot(lib_df, aes(sample, reads, fill = genotype)) +
+  geom_col() +
+  facet_wrap(~ type, scales = "free_y",
+             labeller = as_labeller(c(raw = "Raw counts",
+                                      norm = "DESeq2-normalized"))) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Total reads", x = NULL, title = "Library sizes")
+```
+
+## Sample-to-sample distance heatmap
+
+```{r}
+sample_dist <- dist(t(assay(vsd)))
+dist_mat <- as.matrix(sample_dist)
+rownames(dist_mat) <- paste(vsd$sample, vsd$genotype, sep = " | ")
+colnames(dist_mat) <- vsd$sample
+
+pheatmap(dist_mat,
+         clustering_distance_rows = sample_dist,
+         clustering_distance_cols = sample_dist,
+         col = colorRampPalette(rev(brewer.pal(9, "Blues")))(255),
+         main = "Sample-to-sample distances (VST)")
+```
+
+## PCA
+
+```{r}
+pca_data <- plotPCA(vsd, intgroup = "genotype", returnData = TRUE)
+pct <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(PC1, PC2, color = genotype, label = name)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3, show.legend = FALSE) +
+  xlab(paste0("PC1: ", pct[1], "% variance")) +
+  ylab(paste0("PC2: ", pct[2], "% variance")) +
+  theme_bw() +
+  ggtitle("PCA (VST-transformed counts)")
+```
+
+## Top-500 most variable genes heatmap
+
+```{r}
+rv <- rowVars(assay(vsd))
+top500 <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+mat <- assay(vsd)[top500, ]
+mat <- mat - rowMeans(mat)  # center
+
+annot_col <- data.frame(genotype = meta$genotype,
+                        row.names = meta$sample)
+pheatmap(mat,
+         annotation_col = annot_col,
+         show_rownames = FALSE,
+         scale = "row",
+         clustering_distance_cols = "correlation",
+         main = "Top 500 most variable genes (VST, row-centered)")
+```
+
+## Dispersion estimates
+
+```{r}
+plotDispEsts(dds, main = "DESeq2 dispersion estimates")
+```
+
+# Differential expression
+
+## Helper: annotate results with gene symbols
+
+```{r}
+annotate_res <- function(res_df) {
+  ens <- gsub("\\..*$", "", rownames(res_df))
+  res_df$ensembl  <- ens
+  res_df$symbol   <- mapIds(org.Mm.eg.db, keys = ens, column = "SYMBOL",
+                            keytype = "ENSEMBL", multiVals = "first")
+  res_df$genename <- mapIds(org.Mm.eg.db, keys = ens, column = "GENENAME",
+                            keytype = "ENSEMBL", multiVals = "first")
+  res_df$entrez   <- mapIds(org.Mm.eg.db, keys = ens, column = "ENTREZID",
+                            keytype = "ENSEMBL", multiVals = "first")
+  res_df
+}
+```
+
+## Helper: MA + Volcano plots
+
+```{r}
+plot_volcano <- function(res_df, title, padj_thr = 0.05, lfc_thr = 1,
+                         n_label = 20) {
+  df <- as.data.frame(res_df) %>%
+    filter(!is.na(padj)) %>%
+    mutate(sig = case_when(
+      padj < padj_thr & log2FoldChange >  lfc_thr ~ "Up",
+      padj < padj_thr & log2FoldChange < -lfc_thr ~ "Down",
+      TRUE ~ "NS"
+    ))
+  top <- df %>% filter(sig != "NS") %>%
+    arrange(padj) %>% head(n_label)
+  ggplot(df, aes(log2FoldChange, -log10(padj), color = sig)) +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_vline(xintercept = c(-lfc_thr, lfc_thr), lty = 2, color = "grey40") +
+    geom_hline(yintercept = -log10(padj_thr),      lty = 2, color = "grey40") +
+    scale_color_manual(values = c(Up = "#D7301F", Down = "#2B8CBE", NS = "grey70")) +
+    geom_text_repel(data = top, aes(label = symbol),
+                    size = 3, max.overlaps = Inf, show.legend = FALSE) +
+    theme_bw() +
+    labs(title = title, x = "log2 fold change", y = "-log10 adj. p",
+         color = NULL)
+}
+```
+
+## Run all three contrasts
+
+```{r}
+run_contrast <- function(dds, num, den, label) {
+  res <- results(dds, contrast = c("genotype", num, den), alpha = 0.05)
+  # apeglm shrinkage requires coef-based interface; refit with num as reference
+  # of the coefficient to shrink, using the built coefficient name.
+  coef_name <- paste0("genotype_", num, "_vs_", den)
+  if (coef_name %in% resultsNames(dds)) {
+    res_shrunk <- lfcShrink(dds, coef = coef_name, type = "apeglm", res = res)
+  } else {
+    # Fall back to ashr-style normal shrinkage using contrast
+    res_shrunk <- lfcShrink(dds, contrast = c("genotype", num, den),
+                            type = "normal", res = res)
+  }
+  df <- as.data.frame(res_shrunk) %>%
+    rownames_to_column("gene_id")
+  rownames(df) <- df$gene_id
+  df <- annotate_res(df)
+  df$contrast <- label
+  df
+}
+
+res_homo_wt   <- run_contrast(dds, "homo", "wt",  "homo_vs_wt")
+res_het_wt    <- run_contrast(dds, "het",  "wt",  "het_vs_wt")
+res_homo_het  <- run_contrast(dds, "homo", "het", "homo_vs_het")
+```
+
+## Summary of DE calls
+
+```{r}
+summarize_res <- function(df, padj_thr = 0.05, lfc_thr = 1) {
+  df %>%
+    filter(!is.na(padj)) %>%
+    summarize(
+      contrast = unique(contrast),
+      tested   = n(),
+      sig_strict_up   = sum(padj < padj_thr & log2FoldChange >  lfc_thr),
+      sig_strict_down = sum(padj < padj_thr & log2FoldChange < -lfc_thr),
+      sig_loose_up    = sum(padj < 0.1 & log2FoldChange >  0),
+      sig_loose_down  = sum(padj < 0.1 & log2FoldChange <  0)
+    )
+}
+de_summary <- bind_rows(
+  summarize_res(res_homo_wt),
+  summarize_res(res_het_wt),
+  summarize_res(res_homo_het)
+)
+de_summary
+```
+
+## Write full DE tables
+
+```{r}
+write.csv(res_homo_wt,  file.path(tab_dir, "DE_homo_vs_wt.csv"),  row.names = FALSE)
+write.csv(res_het_wt,   file.path(tab_dir, "DE_het_vs_wt.csv"),   row.names = FALSE)
+write.csv(res_homo_het, file.path(tab_dir, "DE_homo_vs_het.csv"), row.names = FALSE)
+```
+
+# Primary contrast: homo vs wt
+
+## MA plot
+
+```{r}
+plotMA(results(dds, contrast = c("genotype", "homo", "wt")),
+       ylim = c(-6, 6), main = "MA plot: homo vs wt")
+```
+
+## Volcano plot
+
+```{r}
+plot_volcano(res_homo_wt, "Volcano: homo vs wt")
+```
+
+## Top 30 DE genes (by padj)
+
+```{r}
+res_homo_wt %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  select(symbol, genename, log2FoldChange, lfcSE, pvalue, padj) %>%
+  head(30)
+```
+
+## Heatmap of top DE genes across all samples
+
+```{r}
+top_genes <- res_homo_wt %>%
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  arrange(padj) %>%
+  head(50) %>%
+  pull(gene_id)
+
+if (length(top_genes) >= 2) {
+  mat <- assay(vsd)[top_genes, , drop = FALSE]
+  rownames(mat) <- ifelse(is.na(res_homo_wt[top_genes, "symbol"]),
+                          top_genes, res_homo_wt[top_genes, "symbol"])
+  pheatmap(mat,
+           annotation_col = annot_col,
+           scale = "row",
+           show_rownames = TRUE, fontsize_row = 7,
+           main = "Top DE genes (homo vs wt), VST z-score")
+} else {
+  cat("Not enough genes pass strict cutoff for heatmap.\n")
+}
+```
+
+# Secondary contrast: het vs wt
+
+```{r}
+plot_volcano(res_het_wt, "Volcano: het vs wt")
+```
+
+```{r}
+res_het_wt %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  select(symbol, genename, log2FoldChange, lfcSE, pvalue, padj) %>%
+  head(20)
+```
+
+# Secondary contrast: homo vs het
+
+```{r}
+plot_volcano(res_homo_het, "Volcano: homo vs het")
+```
+
+```{r}
+res_homo_het %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  select(symbol, genename, log2FoldChange, lfcSE, pvalue, padj) %>%
+  head(20)
+```
+
+# Cross-contrast comparison
+
+## Overlap of significant DEGs
+
+```{r}
+sig <- function(df, padj_thr = 0.05, lfc_thr = 1) {
+  df %>% filter(!is.na(padj), padj < padj_thr, abs(log2FoldChange) > lfc_thr) %>%
+    pull(gene_id)
+}
+sig_sets <- list(
+  homo_vs_wt  = sig(res_homo_wt),
+  het_vs_wt   = sig(res_het_wt),
+  homo_vs_het = sig(res_homo_het)
+)
+sapply(sig_sets, length)
+```
+
+```{r}
+overlap_df <- tibble(
+  set = c("homo_vs_wt only",
+          "het_vs_wt only",
+          "homo_vs_het only",
+          "homo_vs_wt & het_vs_wt",
+          "homo_vs_wt & homo_vs_het",
+          "het_vs_wt & homo_vs_het",
+          "all three"),
+  n = c(
+    length(setdiff(sig_sets$homo_vs_wt,
+                   union(sig_sets$het_vs_wt, sig_sets$homo_vs_het))),
+    length(setdiff(sig_sets$het_vs_wt,
+                   union(sig_sets$homo_vs_wt, sig_sets$homo_vs_het))),
+    length(setdiff(sig_sets$homo_vs_het,
+                   union(sig_sets$homo_vs_wt, sig_sets$het_vs_wt))),
+    length(setdiff(intersect(sig_sets$homo_vs_wt, sig_sets$het_vs_wt),
+                   sig_sets$homo_vs_het)),
+    length(setdiff(intersect(sig_sets$homo_vs_wt, sig_sets$homo_vs_het),
+                   sig_sets$het_vs_wt)),
+    length(setdiff(intersect(sig_sets$het_vs_wt, sig_sets$homo_vs_het),
+                   sig_sets$homo_vs_wt)),
+    length(Reduce(intersect, sig_sets))
+  )
+)
+ggplot(overlap_df, aes(reorder(set, n), n)) +
+  geom_col(fill = "#4C72B0") + coord_flip() + theme_bw() +
+  labs(x = NULL, y = "DEGs", title = "DEG overlap across contrasts")
+```
+
+## Union heatmap (all DEGs across contrasts)
+
+```{r}
+union_genes <- Reduce(union, sig_sets)
+if (length(union_genes) >= 2) {
+  mat <- assay(vsd)[union_genes, , drop = FALSE]
+  labels <- res_homo_wt[union_genes, "symbol"]
+  rownames(mat) <- ifelse(is.na(labels) | labels == "",
+                          union_genes, labels)
+  pheatmap(mat,
+           annotation_col = annot_col,
+           scale = "row",
+           show_rownames = length(union_genes) <= 60,
+           fontsize_row = 6,
+           main = paste0("Union of DEGs across contrasts (n = ",
+                         length(union_genes), ")"))
+}
+```
+
+# Functional enrichment (GO + KEGG + GSEA)
+
+## Helper
+
+```{r}
+run_go <- function(gene_symbols_or_entrez, universe_entrez,
+                   ont = "BP", title = "") {
+  if (length(gene_symbols_or_entrez) < 10) {
+    message("Too few genes for ", title, " (", ont, ")")
+    return(NULL)
+  }
+  enrichGO(gene         = gene_symbols_or_entrez,
+           universe     = universe_entrez,
+           OrgDb        = org.Mm.eg.db,
+           keyType      = "ENTREZID",
+           ont          = ont,
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05,
+           qvalueCutoff = 0.2,
+           readable     = TRUE)
+}
+```
+
+## Gene universes
+
+```{r}
+universe_entrez <- res_homo_wt$entrez %>% na.omit() %>% unique()
+
+de_entrez <- function(df, padj_thr = 0.05, lfc_thr = 1, direction = NULL) {
+  x <- df %>% filter(!is.na(padj), padj < padj_thr, abs(log2FoldChange) > lfc_thr)
+  if (!is.null(direction)) {
+    x <- if (direction == "up")   filter(x, log2FoldChange >  lfc_thr)
+         else                     filter(x, log2FoldChange < -lfc_thr)
+  }
+  x$entrez %>% na.omit() %>% unique()
+}
+```
+
+## GO enrichment — homo vs wt (primary)
+
+```{r}
+up_hw   <- de_entrez(res_homo_wt, direction = "up")
+down_hw <- de_entrez(res_homo_wt, direction = "down")
+cat("Up genes:", length(up_hw), " Down genes:", length(down_hw), "\n")
+```
+
+```{r}
+ego_bp_up   <- run_go(up_hw,   universe_entrez, "BP", "up-BP")
+ego_bp_down <- run_go(down_hw, universe_entrez, "BP", "down-BP")
+ego_mf_up   <- run_go(up_hw,   universe_entrez, "MF", "up-MF")
+ego_cc_up   <- run_go(up_hw,   universe_entrez, "CC", "up-CC")
+
+if (!is.null(ego_bp_up) && nrow(ego_bp_up) > 0) {
+  print(dotplot(ego_bp_up, showCategory = 15) +
+        ggtitle("GO:BP enrichment — upregulated in homo vs wt"))
+}
+```
+
+```{r}
+if (!is.null(ego_bp_down) && nrow(ego_bp_down) > 0) {
+  print(dotplot(ego_bp_down, showCategory = 15) +
+        ggtitle("GO:BP enrichment — downregulated in homo vs wt"))
+}
+if (!is.null(ego_mf_up) && nrow(ego_mf_up) > 0) {
+  print(barplot(ego_mf_up, showCategory = 15) +
+        ggtitle("GO:MF — upregulated in homo vs wt"))
+}
+```
+
+```{r}
+if (!is.null(ego_cc_up) && nrow(ego_cc_up) > 0) {
+  print(barplot(ego_cc_up, showCategory = 15) +
+        ggtitle("GO:CC — upregulated in homo vs wt"))
+}
+```
+
+## KEGG pathway enrichment — homo vs wt
+
+`enrichKEGG` calls the KEGG REST API and can hang
+indefinitely if the server is slow/offline. We wrap each call in a child
+process with a hard 120-second timeout so a KEGG outage can’t block the
+render.
+
+```{r}
+options(timeout = 60)  # affects base R HTTP timeouts
+
+run_kegg <- function(genes, universe, label, timeout_s = 120) {
+  if (length(genes) < 10) {
+    message("Too few genes for KEGG (", label, ")"); return(NULL)
+  }
+  # setTimeLimit throws an interrupt at next R-level check if elapsed exceeds
+  # timeout_s. Combined with `options(timeout)` for HTTP, this bounds KEGG runtime.
+  tryCatch({
+    setTimeLimit(elapsed = timeout_s, transient = TRUE)
+    on.exit(setTimeLimit(elapsed = Inf, transient = TRUE), add = TRUE)
+    enrichKEGG(gene = genes, organism = "mmu",
+               universe = universe, pvalueCutoff = 0.05)
+  }, error = function(e) {
+    message("KEGG failed (", label, "): ", e$message); NULL
+  })
+}
+
+kegg_up   <- run_kegg(up_hw,   universe_entrez, "up-homo-vs-wt")
+kegg_down <- run_kegg(down_hw, universe_entrez, "down-homo-vs-wt")
+
+# Some enrichment steps consume tempfiles heavily; ensure tempdir is intact
+# before subsequent chunks so `file("", "w+b")` can't fail.
+if (!dir.exists(tempdir())) dir.create(tempdir(), recursive = TRUE)
+
+if (!is.null(kegg_up) && nrow(kegg_up) > 0) {
+  print(dotplot(kegg_up, showCategory = 15) +
+        ggtitle("KEGG — up in homo vs wt"))
+}
+```
+
+```{r}
+if (!is.null(kegg_down) && nrow(kegg_down) > 0) {
+  print(dotplot(kegg_down, showCategory = 15) +
+        ggtitle("KEGG — down in homo vs wt"))
+}
+```
+
+## GSEA (ranked by shrunk log2FC) — homo vs wt
+
+```{r}
+if (!dir.exists(tempdir())) dir.create(tempdir(), recursive = TRUE)
+
+rank_vec <- res_homo_wt %>%
+  filter(!is.na(entrez), !is.na(log2FoldChange)) %>%
+  distinct(entrez, .keep_all = TRUE) %>%
+  { setNames(.$log2FoldChange, .$entrez) } %>%
+  sort(decreasing = TRUE)
+
+gse_bp <- tryCatch(
+  withCallingHandlers(
+    gseGO(geneList = rank_vec, OrgDb = org.Mm.eg.db, keyType = "ENTREZID",
+          ont = "BP", pvalueCutoff = 0.05, verbose = FALSE),
+    warning = function(w) invokeRestart("muffleWarning")),
+  error = function(e) { message("GSEA failed: ", e$message); NULL }
+)
+
+if (!is.null(gse_bp) && nrow(gse_bp) > 0) {
+  gse_bp <- setReadable(gse_bp, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+  print(dotplot(gse_bp, showCategory = 15, split = ".sign") +
+        facet_grid(. ~ .sign) +
+        ggtitle("GSEA GO:BP — homo vs wt"))
+}
+```
+
+## Concept network (top GO:BP terms)
+
+```{r}
+if (!is.null(ego_bp_up) && nrow(ego_bp_up) >= 3) {
+  fc_named <- setNames(res_homo_wt$log2FoldChange, res_homo_wt$entrez)
+  fc_named <- fc_named[!is.na(names(fc_named))]
+  tryCatch({
+    print(cnetplot(ego_bp_up, showCategory = 5, color.params = list(foldChange = fc_named)) +
+          ggtitle("cnetplot — GO:BP upregulated (homo vs wt)"))
+  }, error = function(e) {
+    message("cnetplot skipped: ", e$message)
+    print(cnetplot(ego_bp_up, showCategory = 5) +
+          ggtitle("cnetplot — GO:BP upregulated (homo vs wt)"))
+  })
+  tryCatch({
+    print(emapplot(pairwise_termsim(ego_bp_up), showCategory = 20) +
+          ggtitle("emapplot — GO:BP upregulated (homo vs wt)"))
+  }, error = function(e) message("emapplot skipped: ", e$message))
+}
+```
+
+## GO enrichment — het vs wt (secondary, condensed)
+
+```{r}
+up_ew   <- de_entrez(res_het_wt, direction = "up")
+down_ew <- de_entrez(res_het_wt, direction = "down")
+
+ego_bp_up_ew   <- run_go(up_ew,   universe_entrez, "BP", "het-up-BP")
+ego_bp_down_ew <- run_go(down_ew, universe_entrez, "BP", "het-down-BP")
+
+if (!is.null(ego_bp_up_ew) && nrow(ego_bp_up_ew) > 0) {
+  print(dotplot(ego_bp_up_ew, showCategory = 15) +
+        ggtitle("GO:BP — up in het vs wt"))
+}
+```
+
+```{r}
+if (!is.null(ego_bp_down_ew) && nrow(ego_bp_down_ew) > 0) {
+  print(dotplot(ego_bp_down_ew, showCategory = 15) +
+        ggtitle("GO:BP — down in het vs wt"))
+}
+```
+
+## Save enrichment tables
+
+```{r}
+save_enrich <- function(x, name) {
+  if (!is.null(x) && nrow(x) > 0) {
+    write.csv(as.data.frame(x),
+              file.path(tab_dir, paste0("enrich_", name, ".csv")),
+              row.names = FALSE)
+  }
+}
+save_enrich(ego_bp_up,     "GO_BP_up_homo_vs_wt")
+save_enrich(ego_bp_down,   "GO_BP_down_homo_vs_wt")
+save_enrich(ego_mf_up,     "GO_MF_up_homo_vs_wt")
+save_enrich(ego_cc_up,     "GO_CC_up_homo_vs_wt")
+save_enrich(kegg_up,       "KEGG_up_homo_vs_wt")
+save_enrich(kegg_down,     "KEGG_down_homo_vs_wt")
+save_enrich(gse_bp,        "GSEA_BP_homo_vs_wt")
+save_enrich(ego_bp_up_ew,  "GO_BP_up_het_vs_wt")
+save_enrich(ego_bp_down_ew,"GO_BP_down_het_vs_wt")
+```
+
+# Cross-check with imaged markers
+
+These genes were previously imaged in the same oocyte cohort. This
+section extracts their normalized counts and DE stats across all three
+contrasts so you can cross-verify the imaging phenotype against the
+transcript level.
+
+Notes:
+
+- **H3K9me2** is a histone mark, not a gene. We report
+  the main writers (`Ehmt2` = G9a, `Ehmt1` = GLP)
+  and erasers (`Kdm3a/b`, `Kdm4a/b/c`).
+- **L1ORF1** — LINE-1 ORF1 is a retrotransposon sequence,
+  not a standard annotated gene. Standard gene-level RNA-seq (like this
+  pipeline) does not quantify repeat elements. `L1td1` (LINE-1
+  type transposase domain containing 1) is included as the closest
+  annotated proxy; for true LINE-1 activity you’d need a TE-aware
+  re-quantification (e.g., TEtranscripts).
+
+```{r}
+imaged_markers <- tibble::tribble(
+  ~imaged,     ~symbol,   ~role,
+  "FTO",       "Fto",     "m6A demethylase (imaged)",
+  "gH2AX",     "H2ax",    "DNA-damage marker (imaged)",
+  "Rad51",     "Rad51",   "HR repair (imaged)",
+  "HP1g",      "Cbx3",    "Heterochromatin protein 1 gamma (imaged)",
+  "H3K9me2",   "Ehmt2",   "H3K9 methyltransferase - G9a (writer)",
+  "H3K9me2",   "Ehmt1",   "H3K9 methyltransferase - GLP (writer)",
+  "H3K9me2",   "Kdm3a",   "H3K9me1/2 demethylase (eraser)",
+  "H3K9me2",   "Kdm3b",   "H3K9me1/2 demethylase (eraser)",
+  "H3K9me2",   "Kdm4a",   "H3K9me2/3 demethylase (eraser)",
+  "H3K9me2",   "Kdm4b",   "H3K9me2/3 demethylase (eraser)",
+  "H3K9me2",   "Kdm4c",   "H3K9me2/3 demethylase (eraser)",
+  "L1ORF1",    "L1td1",   "LINE-1 type transposase domain (proxy)"
+)
+imaged_markers
+```
+
+## Combined DE stats across contrasts
+
+```{r}
+# Pull each gene from each contrast, then pivot wide by contrast.
+pick <- function(res_df, contrast_lbl) {
+  res_df %>%
+    filter(symbol %in% imaged_markers$symbol) %>%
+    select(symbol, log2FoldChange, padj, baseMean) %>%
+    rename(!!paste0("lfc_", contrast_lbl)  := log2FoldChange,
+           !!paste0("padj_", contrast_lbl) := padj)
+}
+
+de_hw <- pick(res_homo_wt,  "homo_vs_wt")  %>% select(-baseMean)
+de_ew <- pick(res_het_wt,   "het_vs_wt")   %>% select(-baseMean)
+de_hh <- pick(res_homo_het, "homo_vs_het")
+# baseMean is the same across contrasts (single fit) so keep it from one
+
+imaged_de <- imaged_markers %>%
+  left_join(de_hh %>% select(symbol, baseMean), by = "symbol") %>%
+  left_join(de_hw, by = "symbol") %>%
+  left_join(de_ew, by = "symbol") %>%
+  left_join(de_hh %>% select(-baseMean), by = "symbol") %>%
+  mutate(across(starts_with("lfc_"),  ~ round(.x, 3)),
+         across(starts_with("padj_"), ~ signif(.x, 3)),
+         baseMean = round(baseMean, 1))
+imaged_de
+```
+
+```{r}
+write.csv(imaged_de, file.path(tab_dir, "imaged_markers_DE.csv"),
+          row.names = FALSE)
+```
+
+## Per-sample normalized counts
+
+```{r}
+sym_to_id <- res_homo_wt %>%
+  filter(symbol %in% imaged_markers$symbol) %>%
+  select(gene_id, symbol) %>%
+  distinct(symbol, .keep_all = TRUE)
+
+nc <- norm_counts[sym_to_id$gene_id, , drop = FALSE]
+rownames(nc) <- sym_to_id$symbol
+
+imaged_counts <- as.data.frame(nc) %>%
+  tibble::rownames_to_column("symbol") %>%
+  left_join(imaged_markers %>% select(symbol, imaged, role), by = "symbol") %>%
+  select(imaged, symbol, role, all_of(colnames(counts))) %>%
+  mutate(across(all_of(colnames(counts)), ~ round(.x, 1)))
+imaged_counts
+```
+
+```{r}
+write.csv(imaged_counts,
+          file.path(tab_dir, "imaged_markers_normalized_counts.csv"),
+          row.names = FALSE)
+```
+
+## Heatmap of imaged markers (VST, row-centered)
+
+```{r}
+have <- sym_to_id$gene_id
+if (length(have) >= 2) {
+  mat <- assay(vsd)[have, , drop = FALSE]
+  rownames(mat) <- sym_to_id$symbol
+  pheatmap(mat,
+           annotation_col = annot_col,
+           scale = "row",
+           cluster_rows = length(have) > 2,
+           main = "Imaged markers — VST z-score across samples")
+} else {
+  cat("Not enough imaged markers found in the dataset.\n")
+}
+```
+
+## Genes not found in the dataset
+
+```{r}
+missing_syms <- setdiff(imaged_markers$symbol, sym_to_id$symbol)
+if (length(missing_syms) == 0) {
+  cat("All imaged-marker gene symbols were found in the DE tables.\n")
+} else {
+  cat("Not found (may be filtered out by low-count filter):\n")
+  print(missing_syms)
+}
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Launch nf-core/rnaseq for the aging/curcumin/Pul mouse project. See docs/Aging_Intervention_Analysis.md.
+# ARCHIVED AS RUN: paths refer to the original ~/rnaseq-obob layout (config files were beside this script).
+# Launch nf-core/rnaseq for the OB/OB mouse project. See docs/RNAseq_Analysis_Pipeline.md.
 set -euo pipefail
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"

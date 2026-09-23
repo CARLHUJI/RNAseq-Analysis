@@ -1,0 +1,3 @@
+sample,fastq_1,fastq_2,strandedness
+het2,/home/govind/data/raw/Giovind_het2_S62_L008_R1_001.fastq.gz,/home/govind/data/raw/Giovind_het2_S62_L008_R2_001.fastq.gz,reverse
+het3,/home/govind/data/raw/Giovind_het3_S63_L008_R1_001.fastq.gz,/home/govind/data/raw/Giovind_het3_S63_L008_R2_001.fastq.gz,reverse

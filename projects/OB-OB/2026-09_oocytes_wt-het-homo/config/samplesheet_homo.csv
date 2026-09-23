@@ -1,0 +1,4 @@
+sample,fastq_1,fastq_2,strandedness
+homo1,/home/govind/data/raw/Giovind_homo1_S64_L008_R1_001.fastq.gz,/home/govind/data/raw/Giovind_homo1_S64_L008_R2_001.fastq.gz,reverse
+homo2,/home/govind/data/raw/Giovind_homo2_S65_L008_R1_001.fastq.gz,/home/govind/data/raw/Giovind_homo2_S65_L008_R2_001.fastq.gz,reverse
+homo3,/home/govind/data/raw/Giovind_homo3_S66_L008_R1_001.fastq.gz,/home/govind/data/raw/Giovind_homo3_S66_L008_R2_001.fastq.gz,reverse

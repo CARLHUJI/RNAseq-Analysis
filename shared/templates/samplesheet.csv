@@ -1,0 +1,3 @@
+sample,fastq_1,fastq_2,strandedness
+GROUP_1,/home/govind/data/raw-CHANGE_ME/SAMPLE1_R1_001.fastq.gz,/home/govind/data/raw-CHANGE_ME/SAMPLE1_R2_001.fastq.gz,reverse
+GROUP_2,/home/govind/data/raw-CHANGE_ME/SAMPLE2_R1_001.fastq.gz,/home/govind/data/raw-CHANGE_ME/SAMPLE2_R2_001.fastq.gz,reverse
