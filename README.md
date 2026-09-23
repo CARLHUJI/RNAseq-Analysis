@@ -7,9 +7,13 @@ Processed with nf-core/rnaseq 3.26.0 (`star_salmon`, Apptainer) against Ensembl 
 | File | Purpose |
 |---|---|
 | `nextflow.config` | pipeline parameters (kit-specific UMI/strandedness settings, resources, reference) |
-| `run_pipeline.sh` | launcher (`conda activate nfcore`, then nf-core/rnaseq with `-resume`) |
+| `samplesheet_{Y2,O9C,O9Cur,O9Pul}.csv` | per-group nf-core samplesheets (n = 3 per group) |
+| `run_group.sh <GROUP>` | runs one group end to end: nf-core/rnaseq, then Track A featureCounts |
+| `backup_group.sh <GROUP>` | copies a group's results to D: and verifies every file size |
+| `run_pipeline.sh` | single-samplesheet launcher (`conda activate nfcore`, nf-core/rnaseq with `-resume`) |
 | `environment-r.yml` | conda env for downstream DESeq2/edgeR analysis |
 | `docs/Aging_Intervention_Analysis.md` / `.pdf` | analysis plan: design, contrasts, rescue analysis, phases |
+| `docs/Aging_Intervention_Analysis.docx`, `docs/build_methods_doc.py` | methods overview (Word) and the script that builds it |
 | `docs/WSL2_Environment_Setup.md` | how the compute environment was built |
 
 Raw FASTQs and results are not versioned here.
